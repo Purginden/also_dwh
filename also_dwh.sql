@@ -1523,7 +1523,7 @@ BEGIN
             -- Получаем manager_id по ФИО
             SELECT manager_id INTO v_manager_id
             FROM also.dim_manager
-            WHERE full_name = v_record.manager_full_name
+            WHERE manager_name = v_record.manager_full_name
             LIMIT 1;
             
             IF v_manager_id IS NULL THEN
@@ -1805,6 +1805,267 @@ LIMIT 30;
 
 -- Чистим Планы продаж по менеджерам
 --TRUNCATE TABLE also.manager_sales_plan RESTART IDENTITY;
+
+
+-- =====================================================
+--  Обертки для Airflow
+-- =====================================================
+
+
+-- Данные из file_manager_plan в manager_sales_plan
+
+CREATE OR REPLACE FUNCTION also.run_process_file_manager_plan()
+RETURNS TEXT AS $$
+DECLARE
+    v_start_time TIMESTAMP;
+    v_end_time TIMESTAMP;
+    v_unprocessed INTEGER;
+    v_result TEXT;
+BEGIN
+    v_start_time := CURRENT_TIMESTAMP;
+    
+    -- Проверяем наличие необработанных записей
+    SELECT COUNT(*) INTO v_unprocessed
+    FROM also.file_manager_plan
+    WHERE is_processed = FALSE;
+    
+    IF v_unprocessed = 0 THEN
+        v_result := 'Нет необработанных записей для обработки';
+        RAISE NOTICE '⚠️ %', v_result;
+        RETURN v_result;
+    END IF;
+    
+    RAISE NOTICE '🚀 Начинаем обработку % записей в %', v_unprocessed, v_start_time;
+    
+    -- Вызываем процедуру
+    CALL also.process_file_manager_plan();
+    
+    v_end_time := CURRENT_TIMESTAMP;
+    v_result := format('✅ Обработка завершена. Обработано: %s записей. Время: %s секунд', 
+                       v_unprocessed, 
+                       EXTRACT(SECOND FROM (v_end_time - v_start_time)));
+    
+    RAISE NOTICE '%', v_result;
+    RETURN v_result;
+END;
+$$ LANGUAGE plpgsql;
+
+SELECT also.run_process_file_manager_plan();
+
+
+-- Обновление Витрина 8: План-факт по менеджерам 
+
+CREATE OR REPLACE FUNCTION also.refresh_mart_manager_plan_fact()
+RETURNS TEXT AS $$
+BEGIN
+    DROP TABLE IF EXISTS also.mart_manager_plan_fact;
+    
+CREATE TABLE also.mart_manager_plan_fact AS
+WITH 
+-- Фактические показатели по менеджерам
+actual_stats AS (
+    SELECT 
+        f.manager_id,
+        EXTRACT(YEAR FROM f.sale_date)::INTEGER AS year,
+        EXTRACT(MONTH FROM f.sale_date)::INTEGER AS month,
+        SUM(f.total_amount) AS fact_revenue,
+        SUM(f.quantity) AS fact_quantity,
+        COUNT(DISTINCT f.sale_id) AS fact_transactions,
+        COUNT(DISTINCT f.customer_id) AS fact_customers,
+        COUNT(DISTINCT CASE WHEN cust.is_vip THEN f.customer_id END) AS fact_vip_customers,
+        SUM(f.discount_amount) AS fact_discounts,
+        ROUND(AVG(f.total_amount), 2) AS fact_avg_check
+    FROM also.fact_sales f
+    LEFT JOIN also.dim_customer cust ON f.customer_id = cust.customer_id
+    WHERE f.payment_status = 'Paid'
+    GROUP BY f.manager_id, EXTRACT(YEAR FROM f.sale_date), EXTRACT(MONTH FROM f.sale_date)
+),
+-- Плановые показатели
+plan_stats AS (
+    SELECT 
+        manager_id,
+        year,
+        month,
+        month_name,
+        plan_revenue,
+        plan_quantity,
+        plan_transactions,
+        plan_customers,
+        target_growth_percent
+    FROM also.manager_sales_plan
+    WHERE plan_status = 'Approved'
+)
+SELECT 
+    -- Период
+    COALESCE(a.year, p.year) AS year,
+    COALESCE(a.month, p.month) AS month,
+    COALESCE(p.month_name, 
+        CASE COALESCE(a.month, p.month)
+            WHEN 1 THEN 'January' WHEN 2 THEN 'February' WHEN 3 THEN 'March'
+            WHEN 4 THEN 'April' WHEN 5 THEN 'May' WHEN 6 THEN 'June'
+            WHEN 7 THEN 'July' WHEN 8 THEN 'August' WHEN 9 THEN 'September'
+            WHEN 10 THEN 'October' WHEN 11 THEN 'November' WHEN 12 THEN 'December'
+        END
+    ) AS month_name,
+    
+    -- Менеджер
+    COALESCE(a.manager_id, p.manager_id) AS manager_id,
+    m.manager_code,
+    m.manager_name AS manager_name,  -- Исправлено: full_name → manager_name
+    m.manager_level,
+    m.department,
+    b.branch_name,
+    b.city AS branch_city,
+    
+    -- Добавлено поле user_name
+    u.username AS username,
+    
+    -- Плановые показатели
+    COALESCE(p.plan_revenue, 0) AS plan_revenue,
+    COALESCE(p.plan_revenue, 0) / 1000000 AS plan_revenue_mln,
+    COALESCE(p.plan_quantity, 0) AS plan_quantity,
+    COALESCE(p.plan_transactions, 0) AS plan_transactions,
+    COALESCE(p.plan_customers, 0) AS plan_customers,
+    p.target_growth_percent,
+    
+    -- Фактические показатели
+    COALESCE(a.fact_revenue, 0) AS fact_revenue,
+    COALESCE(a.fact_revenue, 0) / 1000000 AS fact_revenue_mln,
+    COALESCE(a.fact_quantity, 0) AS fact_quantity,
+    COALESCE(a.fact_transactions, 0) AS fact_transactions,
+    COALESCE(a.fact_customers, 0) AS fact_customers,
+    COALESCE(a.fact_vip_customers, 0) AS fact_vip_customers,
+    COALESCE(a.fact_discounts, 0) AS fact_discounts,
+    COALESCE(a.fact_avg_check, 0) AS fact_avg_check,
+    
+    -- Процент выполнения плана
+    CASE 
+        WHEN COALESCE(p.plan_revenue, 0) > 0 
+        THEN ROUND(100.0 * COALESCE(a.fact_revenue, 0) / p.plan_revenue, 2)
+        ELSE 0
+    END AS revenue_completion_percent,
+    
+    CASE 
+        WHEN COALESCE(p.plan_quantity, 0) > 0 
+        THEN ROUND(100.0 * COALESCE(a.fact_quantity, 0) / p.plan_quantity, 2)
+        ELSE 0
+    END AS quantity_completion_percent,
+    
+    CASE 
+        WHEN COALESCE(p.plan_transactions, 0) > 0 
+        THEN ROUND(100.0 * COALESCE(a.fact_transactions, 0) / p.plan_transactions, 2)
+        ELSE 0
+    END AS transactions_completion_percent,
+    
+    CASE 
+        WHEN COALESCE(p.plan_customers, 0) > 0 
+        THEN ROUND(100.0 * COALESCE(a.fact_customers, 0) / p.plan_customers, 2)
+        ELSE 0
+    END AS customers_completion_percent,
+    
+    -- Отклонения
+    COALESCE(a.fact_revenue, 0) - COALESCE(p.plan_revenue, 0) AS revenue_variance,
+    COALESCE(a.fact_quantity, 0) - COALESCE(p.plan_quantity, 0) AS quantity_variance,
+    COALESCE(a.fact_transactions, 0) - COALESCE(p.plan_transactions, 0) AS transactions_variance,
+    COALESCE(a.fact_customers, 0) - COALESCE(p.plan_customers, 0) AS customers_variance,
+    
+    -- Статус выполнения
+    CASE 
+        WHEN COALESCE(p.plan_revenue, 0) = 0 THEN 'Нет плана'
+        WHEN COALESCE(a.fact_revenue, 0) >= p.plan_revenue THEN 'Выполнен'
+        WHEN COALESCE(a.fact_revenue, 0) >= p.plan_revenue * 0.8 THEN 'Частично'
+        WHEN COALESCE(a.fact_revenue, 0) >= p.plan_revenue * 0.6 THEN 'Отставание'
+        ELSE 'Провал'
+    END AS plan_status,
+    
+    -- Дополнительные метрики
+    ROUND(COALESCE(a.fact_revenue, 0) / NULLIF(COALESCE(a.fact_transactions, 0), 0), 2) AS actual_avg_check,
+    COALESCE(a.fact_revenue, 0) / NULLIF(COALESCE(a.fact_customers, 0), 0) AS revenue_per_customer,
+    
+    -- Дата расчёта
+    CURRENT_DATE AS calculation_date
+    
+FROM plan_stats p
+FULL OUTER JOIN actual_stats a ON p.manager_id = a.manager_id AND p.year = a.year AND p.month = a.month
+LEFT JOIN also.dim_manager m ON COALESCE(a.manager_id, p.manager_id) = m.manager_id
+LEFT JOIN also.dim_branch b ON m.branch_id = b.branch_id
+LEFT JOIN also.dim_user u ON m.manager_id = u.manager_id
+ORDER BY year DESC, month DESC, revenue_completion_percent DESC;
+
+-- Создаём индексы
+    CREATE INDEX idx_plan_fact_manager ON also.mart_manager_plan_fact(manager_id);
+    CREATE INDEX idx_plan_fact_date ON also.mart_manager_plan_fact(year, month);
+    CREATE INDEX idx_plan_fact_status ON also.mart_manager_plan_fact(plan_status);
+    CREATE INDEX idx_plan_fact_completion ON also.mart_manager_plan_fact(revenue_completion_percent);
+    CREATE INDEX idx_plan_fact_username ON also.mart_manager_plan_fact(username);
+    
+    ANALYZE also.mart_manager_plan_fact;
+    
+    RETURN '✅ Витрина обновлена';
+END;
+$$ LANGUAGE plpgsql;
+
+SELECT also.refresh_mart_manager_plan_fact();
+
+
+-- Обновление Витрина 9: Сводная витрина план-факт по компании 
+
+CREATE OR REPLACE FUNCTION also.refresh_mart_company_plan_fact()
+RETURNS TEXT AS $$
+BEGIN
+    DROP TABLE IF EXISTS also.mart_company_plan_fact;
+    
+    CREATE TABLE also.mart_company_plan_fact AS
+SELECT 
+    year,
+    month,
+    month_name,
+    
+    -- Плановые показатели
+    SUM(plan_revenue) AS total_plan_revenue,
+    SUM(plan_quantity) AS total_plan_quantity,
+    SUM(plan_transactions) AS total_plan_transactions,
+    SUM(plan_customers) AS total_plan_customers,
+    
+    -- Фактические показатели
+    SUM(fact_revenue) AS total_fact_revenue,
+    SUM(fact_quantity) AS total_fact_quantity,
+    SUM(fact_transactions) AS total_fact_transactions,
+    SUM(fact_customers) AS total_fact_customers,
+    
+    -- Количество менеджеров
+    COUNT(DISTINCT manager_id) AS managers_with_plan,
+    COUNT(CASE WHEN fact_revenue > 0 THEN 1 END) AS managers_with_sales,
+    
+    -- Процент выполнения
+    CASE 
+        WHEN SUM(plan_revenue) > 0 
+        THEN ROUND(100.0 * SUM(fact_revenue) / SUM(plan_revenue), 2)
+        ELSE 0
+    END AS company_revenue_completion_percent,
+    
+    -- Количество выполнивших план
+    COUNT(CASE WHEN fact_revenue >= plan_revenue AND plan_revenue > 0 THEN 1 END) AS managers_achieved_plan,
+    COUNT(CASE WHEN fact_revenue >= plan_revenue * 0.8 AND plan_revenue > 0 THEN 1 END) AS managers_good_performance,
+    
+    -- Процент выполнивших
+    ROUND(100.0 * COUNT(CASE WHEN fact_revenue >= plan_revenue AND plan_revenue > 0 THEN 1 END) / 
+          NULLIF(COUNT(CASE WHEN plan_revenue > 0 THEN 1 END), 0), 2) AS achievement_rate_percent
+    
+FROM also.mart_manager_plan_fact
+GROUP BY year, month, month_name
+ORDER BY year DESC, month DESC;
+
+-- Индексы
+CREATE INDEX idx_company_plan_fact_date ON also.mart_company_plan_fact(year, month);
+    
+    ANALYZE also.mart_company_plan_fact;
+    
+    RETURN '✅ Витрина обновлена';
+END;
+$$ LANGUAGE plpgsql;
+
+SELECT also.refresh_mart_company_plan_fact();
 
 
 -- =====================================================
