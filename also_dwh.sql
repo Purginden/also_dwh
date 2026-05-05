@@ -1426,7 +1426,7 @@ END;
 $$;
 
 -- Чистим Факты Продажи
-TRUNCATE TABLE also.fact_sales RESTART IDENTITY
+--TRUNCATE TABLE also.fact_sales RESTART IDENTITY
 
 -- Оптимизация 
   
@@ -1440,7 +1440,7 @@ CREATE INDEX IF NOT EXISTS idx_fact_sales_date ON also.fact_sales(sale_date);
 ----------------------------------------------------------------------------------------------------
 
 -- Детальная витрина данных для проверки
-explain analyze 
+/*explain analyze 
 SELECT 
     f.sale_id,
     f.sale_date,
@@ -1457,7 +1457,7 @@ LEFT JOIN also.dim_product p ON f.product_id = p.product_id
 LEFT JOIN also.dim_customer cust ON f.customer_id = cust.customer_id
 LEFT JOIN also.dim_manager m ON f.manager_id = m.manager_id
 LEFT JOIN also.dim_branch b ON f.branch_id = b.branch_id
-LEFT JOIN also.dim_dealer d ON f.dealer_id = d.dealer_id
+LEFT JOIN also.dim_dealer d ON f.dealer_id = d.dealer_id*/
 
 
 -- =====================================================
@@ -1789,7 +1789,7 @@ ON CONFLICT (manager_id, year, month) DO UPDATE SET
     updated_date = CURRENT_TIMESTAMP;
 
 
-SELECT 
+/*SELECT 
     manager_id,
     year,
     month,
@@ -1801,7 +1801,7 @@ SELECT
 FROM also.manager_sales_plan
 WHERE year = 2026
 ORDER BY manager_id, month
-LIMIT 30;
+LIMIT 30;*/
 
 -- Чистим Планы продаж по менеджерам
 --TRUNCATE TABLE also.manager_sales_plan RESTART IDENTITY;
@@ -1850,7 +1850,7 @@ BEGIN
 END;
 $$ LANGUAGE plpgsql;
 
-SELECT also.run_process_file_manager_plan();
+--SELECT also.run_process_file_manager_plan();
 
 
 -- Обновление Витрина 8: План-факт по менеджерам 
@@ -2005,7 +2005,7 @@ ORDER BY year DESC, month DESC, revenue_completion_percent DESC;
 END;
 $$ LANGUAGE plpgsql;
 
-SELECT also.refresh_mart_manager_plan_fact();
+--SELECT also.refresh_mart_manager_plan_fact();
 
 
 -- Обновление Витрина 9: Сводная витрина план-факт по компании 
@@ -2065,49 +2065,12 @@ CREATE INDEX idx_company_plan_fact_date ON also.mart_company_plan_fact(year, mon
 END;
 $$ LANGUAGE plpgsql;
 
-SELECT also.refresh_mart_company_plan_fact();
-
-
--- =====================================================
--- Служебная часть
--- =====================================================
-
--- Анализируем таблицы для обновления статистики
-ANALYZE also.fact_sales;
-ANALYZE also.dim_product;
-ANALYZE also.dim_customer;
-ANALYZE also.dim_manager;
-ANALYZE also.dim_branch;
-ANALYZE also.dim_dealer;
-
---  Размер схемы also
-SELECT 
-    pg_size_pretty(SUM(pg_total_relation_size(schemaname || '.' || tablename))) AS total_size
-FROM pg_tables
-WHERE schemaname = 'also';
-
---  Размер объектов схемы also
-
-SELECT 
-    tablename AS table_name,
-    pg_size_pretty(pg_total_relation_size(schemaname || '.' || tablename)) AS total_size,
-    pg_size_pretty(pg_relation_size(schemaname || '.' || tablename)) AS table_size,
-    pg_size_pretty(pg_indexes_size(schemaname || '.' || tablename)) AS indexes_size,
-    pg_total_relation_size(schemaname || '.' || tablename) AS size_bytes,
-    -- Количество строк (приблизительно)
-    (SELECT reltuples::bigint 
-     FROM pg_class 
-     WHERE relname = tablename 
-       AND relnamespace = (SELECT oid FROM pg_namespace WHERE nspname = schemaname)) AS estimated_rows
-FROM pg_tables
-WHERE schemaname = 'also'
-ORDER BY pg_total_relation_size(schemaname || '.' || tablename) DESC;
+--SELECT also.refresh_mart_company_plan_fact();
 
 
 -- =====================================================
 -- Витрины данных для BI
 -- =====================================================
-
 
 -- =====================================================
 -- Витрина 1: Ежемесячные KPI по компании
@@ -2407,7 +2370,7 @@ SELECT
     -- Менеджер
     m.manager_id,
     m.manager_code,
-    m.full_name AS manager_name,
+    m.manager_name AS manager_name,
     m.manager_level,
     m.department,
     b.branch_name,
@@ -2516,7 +2479,7 @@ SELECT
     
     -- Менеджер
     m.manager_code,
-    m.full_name AS manager_name,
+    m.manager_name AS manager_name,
     m.manager_level,
     
     -- Филиал
@@ -2708,7 +2671,7 @@ SELECT
     
     -- Менеджер
     m.manager_code,
-    m.full_name AS manager_name,
+    m.manager_name AS manager_name,
     m.phone_work AS manager_phone,
     
     -- Филиал
@@ -2930,3 +2893,62 @@ ORDER BY year DESC, month DESC;
 
 -- Индексы
 CREATE INDEX idx_company_plan_fact_date ON also.mart_company_plan_fact(year, month);
+
+
+-- =====================================================
+-- Служебная часть
+-- =====================================================
+
+-- Сбор статистики по объектам схемы
+
+DO $$
+DECLARE
+    v_rel RECORD;
+    v_count INTEGER := 0;
+BEGIN
+    FOR v_rel IN 
+        SELECT 
+            n.nspname AS schema_name,
+            c.relname AS object_name,
+            CASE c.relkind
+                WHEN 'r' THEN 'TABLE'
+                WHEN 'm' THEN 'MATERIALIZED VIEW'
+                WHEN 'i' THEN 'INDEX'
+                ELSE c.relkind::text
+            END AS object_type
+        FROM pg_class c
+        JOIN pg_namespace n ON n.oid = c.relnamespace
+        WHERE n.nspname = 'also'
+          AND c.relkind IN ('r', 'm')  -- таблицы и мат.вью
+        ORDER BY c.relname
+    LOOP
+        EXECUTE format('ANALYZE also.%I', v_rel.object_name);
+        v_count := v_count + 1;
+        RAISE NOTICE '✅ %: also.%', v_rel.object_type, v_rel.object_name;
+    END LOOP;
+    RAISE NOTICE '📊 Завершено. Проанализировано объектов: %', v_count;
+END;
+$$;
+
+--  Размер схемы also
+SELECT 
+    pg_size_pretty(SUM(pg_total_relation_size(schemaname || '.' || tablename))) AS total_size
+FROM pg_tables
+WHERE schemaname = 'also';
+
+--  Размер объектов схемы also
+
+SELECT 
+    tablename AS table_name,
+    pg_size_pretty(pg_total_relation_size(schemaname || '.' || tablename)) AS total_size,
+    pg_size_pretty(pg_relation_size(schemaname || '.' || tablename)) AS table_size,
+    pg_size_pretty(pg_indexes_size(schemaname || '.' || tablename)) AS indexes_size,
+    pg_total_relation_size(schemaname || '.' || tablename) AS size_bytes,
+    -- Количество строк (приблизительно)
+    (SELECT reltuples::bigint 
+     FROM pg_class 
+     WHERE relname = tablename 
+       AND relnamespace = (SELECT oid FROM pg_namespace WHERE nspname = schemaname)) AS estimated_rows
+FROM pg_tables
+WHERE schemaname = 'also'
+ORDER BY pg_total_relation_size(schemaname || '.' || tablename) DESC;
