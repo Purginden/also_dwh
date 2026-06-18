@@ -16,6 +16,7 @@ CREATE TABLE IF NOT EXISTS also.dim_branch
     is_active boolean DEFAULT true,
     created_date timestamp without time zone DEFAULT CURRENT_TIMESTAMP,
     updated_date timestamp without time zone DEFAULT CURRENT_TIMESTAMP,
+    new_date date,
     CONSTRAINT dim_branch_pkey PRIMARY KEY (branch_id),
     CONSTRAINT dim_branch_branch_code_key UNIQUE (branch_code)
 );
