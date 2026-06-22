@@ -525,13 +525,6 @@ CREATE TABLE IF NOT EXISTS also.mart_regional_monthly
     revenue_per_customer numeric
 );
 
-CREATE TABLE IF NOT EXISTS also.dim_customer_type
-(
-    id_cust_type integer NOT NULL,
-    cust_type_name text,
-    PRIMARY KEY (id_cust_type)
-);
-
 ALTER TABLE IF EXISTS also.dim_manager
     ADD CONSTRAINT fk_manager_branch FOREIGN KEY (branch_id)
     REFERENCES also.dim_branch (branch_id) MATCH SIMPLE
@@ -598,13 +591,5 @@ ALTER TABLE IF EXISTS also.fact_sales
     ON DELETE RESTRICT;
 CREATE INDEX IF NOT EXISTS idx_fact_sales_product_id
     ON also.fact_sales(product_id);
-
-
-ALTER TABLE IF EXISTS also.dim_customer_type
-    ADD FOREIGN KEY (id_cust_type)
-    REFERENCES also.dim_customer (id_cust_type) MATCH SIMPLE
-    ON UPDATE NO ACTION
-    ON DELETE NO ACTION
-    NOT VALID;
 
 END;
