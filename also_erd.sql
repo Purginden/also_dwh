@@ -16,6 +16,8 @@ CREATE TABLE IF NOT EXISTS also.dim_branch
     is_active boolean DEFAULT true,
     created_date timestamp without time zone DEFAULT CURRENT_TIMESTAMP,
     updated_date timestamp without time zone DEFAULT CURRENT_TIMESTAMP,
+    new_date date,
+    id_type integer,
     CONSTRAINT dim_branch_pkey PRIMARY KEY (branch_id),
     CONSTRAINT dim_branch_branch_code_key UNIQUE (branch_code)
 );
@@ -88,7 +90,6 @@ CREATE TABLE IF NOT EXISTS also.dim_customer
     is_active boolean DEFAULT true,
     created_date timestamp without time zone DEFAULT CURRENT_TIMESTAMP,
     updated_date timestamp without time zone DEFAULT CURRENT_TIMESTAMP,
-    id_cust_type integer,
     CONSTRAINT dim_customer_pkey PRIMARY KEY (customer_id),
     CONSTRAINT dim_customer_customer_code_key UNIQUE (customer_code)
 );
@@ -525,6 +526,13 @@ CREATE TABLE IF NOT EXISTS also.mart_regional_monthly
     revenue_per_customer numeric
 );
 
+CREATE TABLE IF NOT EXISTS also.dim_branch_type
+(
+    id_type integer NOT NULL,
+    description text,
+    PRIMARY KEY (id_type)
+);
+
 ALTER TABLE IF EXISTS also.dim_manager
     ADD CONSTRAINT fk_manager_branch FOREIGN KEY (branch_id)
     REFERENCES also.dim_branch (branch_id) MATCH SIMPLE
@@ -591,5 +599,13 @@ ALTER TABLE IF EXISTS also.fact_sales
     ON DELETE RESTRICT;
 CREATE INDEX IF NOT EXISTS idx_fact_sales_product_id
     ON also.fact_sales(product_id);
+
+
+ALTER TABLE IF EXISTS also.dim_branch_type
+    ADD FOREIGN KEY (id_type)
+    REFERENCES also.dim_branch (id_type) MATCH SIMPLE
+    ON UPDATE NO ACTION
+    ON DELETE NO ACTION
+    NOT VALID;
 
 END;
